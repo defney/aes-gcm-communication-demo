@@ -6,7 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
-
+#include "password_auth.h"
 
 bool LoadKey(BYTE key[32])
 {
@@ -18,7 +18,7 @@ bool LoadKey(BYTE key[32])
     if (!file)
     {
         std::cout
-            << "key.bin bulunamadi.\n";
+            << "key.bin not found.\n";
 
         return false;
     }
@@ -70,7 +70,7 @@ bool OpenAESProvider(
     return true;
 }
 
-
+                                  
 bool LoadEncryptedData(
     BYTE nonce[12],
     BYTE tag[16],
@@ -85,24 +85,21 @@ bool LoadEncryptedData(
     if (!file)
     {
         std::cout
-            << "secret.bin bulunamadi.\n";
+            << "cannot find secret.bin.\n";
 
         return false;
     }
 
-    // nonce
     file.read(
         reinterpret_cast<char*>(nonce),
         12
     );
 
-    // tag
     file.read(
         reinterpret_cast<char*>(tag),
         16
     );
 
-    // Bizim payload sabit 64 byte
     ciphertext.resize(64);
 
     file.read(
@@ -187,12 +184,11 @@ bool DecryptPassword(
     if (!BCRYPT_SUCCESS(status))
     {
         std::cout
-            << "Decrypt basarisiz.\n";
+            << "Decrypt unsuccesfull.\n";
 
         return false;
     }
 
-    // Ilk 4 byte -> gerçek uzunluk
     uint32_t originalLength = 0;
 
     std::memcpy(
@@ -207,7 +203,7 @@ bool DecryptPassword(
     )
     {
         std::cout
-            << "Payload gecersiz.\n";
+            << "Unvalid Payload.\n";
 
         return false;
     }
@@ -274,6 +270,16 @@ int main()
         tag,
         password
     ))
+    if (!PasswordAuth::VerifyPassword(password))
+{
+    PasswordAuth::ClearPassword(password);
+    BCryptCloseAlgorithmProvider(hAlg, 0);
+
+    std::cout << "Passwords not match.\n";
+    return 1;
+}
+
+std::cout << "Checked.\n";
     {
         BCryptCloseAlgorithmProvider(
             hAlg,

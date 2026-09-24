@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include "password_auth.h"
 
 bool BuildPaddedPayload(
     const std::string& password,
@@ -16,7 +17,7 @@ bool BuildPaddedPayload(
 
     if (password.size() > PAYLOAD_SIZE - sizeof(uint32_t))
     {
-        std::cout << "Sifre cok uzun.\n";
+        std::cout << "Password too long.\n";
         return false;
     }
 
@@ -32,21 +33,20 @@ bool BuildPaddedPayload(
 
     if (!BCRYPT_SUCCESS(status))
     {
-        std::cout << "Padding uretilemedi.\n";
+        std::cout << "Cannot create padding.\n";
         return false;
     }
-
+    //lenght as 4 byte
     uint32_t length =
         static_cast<uint32_t>(password.size());
 
-    // Ilk 4 byte = gercek uzunluk
+    
     std::memcpy(
         payload.data(),
         &length,
         sizeof(length)
     );
-
-    // Sonra password
+//pasword after length bytes
     std::memcpy(
         payload.data() + sizeof(length),
         password.data(),
@@ -55,8 +55,7 @@ bool BuildPaddedPayload(
 
     return true;
 }
-
-
+// create key randomly
 bool GenerateAndSaveKey()
 {
     BYTE key[32];
@@ -70,7 +69,7 @@ bool GenerateAndSaveKey()
 
     if (!BCRYPT_SUCCESS(status))
     {
-        std::cout << "Key uretilemedi.\n";
+        std::cout << "Key cannot be created.\n";
         return false;
     }
 
@@ -81,7 +80,7 @@ bool GenerateAndSaveKey()
 
     if (!file)
     {
-        std::cout << "key.bin acilamadi.\n";
+        std::cout << "Cannot open key.bin\n";
         return false;
     }
 
@@ -93,7 +92,7 @@ bool GenerateAndSaveKey()
     return true;
 }
 
-
+//eger key varsa onu okur byte olarak
 bool LoadKey(BYTE key[32])
 {
     std::ifstream file(
@@ -114,7 +113,7 @@ bool LoadKey(BYTE key[32])
     return static_cast<bool>(file);
 }
 
-
+//aes gcm kullanicak bbilgisini verir ama henuz sifreleme yok 
 bool OpenAESProvider(
     BCRYPT_ALG_HANDLE& hAlg
 )
@@ -264,7 +263,7 @@ bool SaveEncryptedData(
     if (!file)
     {
         std::cout
-            << "secret.bin acilamadi.\n";
+            << "Cannot open secret.bin\n";
 
         return false;
     }
@@ -293,15 +292,55 @@ bool SaveEncryptedData(
 }
 
 
-int main()
+int main(int argc, char* argv[])
 {
+    // İlk parola kaydı için ayrı çalıştırma:
+    // app1.exe --register
+    if (argc == 2 && std::string(argv[1]) == "--register")
+    {
+        std::string password;
+        std::string confirmation;
+
+        std::cout << "New password: ";
+        std::getline(std::cin, password);
+
+        std::cout << "Enter again: ";
+        std::getline(std::cin, confirmation);
+
+        if (!std::cin || password != confirmation)
+        {
+            PasswordAuth::ClearPassword(password);
+            PasswordAuth::ClearPassword(confirmation);
+
+            std::cout << "Passwords are not same.\n";
+            return 1;
+        }
+
+        bool saved = PasswordAuth::RegisterPassword(password);
+
+        PasswordAuth::ClearPassword(password);
+        PasswordAuth::ClearPassword(confirmation);
+
+        std::cout << (
+            saved
+            ? "Saved.\n"
+            : "Not Saved.\n"
+        );
+
+        return saved ? 0 : 1;
+    }
+
+    if (argc != 1)
+    {
+        std::cout << "Usage: app1.exe [--register]\n";
+        return 1;
+    }
     BYTE key[32];
 
-    // Ilk calismada key olustur
     if (!LoadKey(key))
     {
         std::cout
-            << "Key yok. Yeni key olusturuluyor...\n";
+            << "Key not existing. Creating new key...\n";
 
         if (!GenerateAndSaveKey())
         {
@@ -321,13 +360,22 @@ int main()
         std::cin,
         password
     );
+    if (!PasswordAuth::VerifyPassword(password))
+{
+    PasswordAuth::ClearPassword(password);
+
+    std::cout << "Password can not verified. stopped.\n";
+    return 1;
+}
+
+std::cout << "Correct pasaword. Continuing encrption.\n";
 
     BCRYPT_ALG_HANDLE hAlg = nullptr;
 
     if (!OpenAESProvider(hAlg))
     {
         std::cout
-            << "AES-GCM acilamadi.\n";
+            << "AES-GCM cannot open.\n";
 
         return 1;
     }
@@ -347,7 +395,7 @@ int main()
     ))
     {
         std::cout
-            << "Encryption basarisiz.\n";
+            << "Unsuccesfull encrption.\n";
 
         BCryptCloseAlgorithmProvider(
             hAlg,
@@ -382,7 +430,8 @@ int main()
     }
 
     std::cout
-        << "\nsecret.bin kaydedildi.\n";
+        << "\nsaved secret.bin.\n";
+        
 
     BCryptCloseAlgorithmProvider(
         hAlg,
