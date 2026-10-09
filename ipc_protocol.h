@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <cstddef>
 
-// Version 2: sequence and message kind are authenticated with AES-GCM.
+// Version 2: the sequence number and message kind are authenticated with AES-GCM.
 constexpr uint32_t IPC_VERSION = 2;
 constexpr ULONG_PTR IPC_ECDH_PUBLIC_KEY = 0x53504332;
 constexpr ULONG_PTR IPC_ENCRYPTED_RECORD = 0x53504335;
@@ -30,5 +30,5 @@ struct EncryptedPasswordMessage {
 };
 static_assert(sizeof(EcdhPublicKeyMessage) == 80, "ECDH layout");
 static_assert(offsetof(EncryptedPasswordMessage, nonce) == 16, "AAD layout");
-// 108 meaningful bytes; struct tail padding is never transmitted.
+// There are 108 meaningful bytes; structure tail padding is never transmitted.
 constexpr DWORD ENCRYPTED_WIRE_SIZE = 108;

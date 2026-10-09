@@ -17,5 +17,5 @@ struct EcdhSession {
 bool CreateEcdhSession(EcdhSession& s);
 bool DeriveSessionKeys(EcdhSession& s, const BYTE peer[72], bool isMenu);
 void ClearEcdhSession(EcdhSession& s);
-// Shared implementation: each executable still owns its own independent state.
+// Shared implementation: each executable retains its own independent state.
 int RunSessionApplication(bool isMenu, int argc, char** argv);

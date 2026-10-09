@@ -40,7 +40,7 @@ bool Derive(BCRYPT_SECRET_HANDLE secret, const BYTE context[144],
                           output, 32, &done, 0)) && done == 32;
 }
 
-// One key per direction. The counter makes nonce reuse impossible in a session.
+// One key is used per direction. The counter prevents nonce reuse within a session.
 void SetNonce(uint64_t sequence, BYTE nonce[12]) {
     std::memset(nonce, 0, 12);
     for (int i = 0; i < 8; ++i)
@@ -110,7 +110,7 @@ struct App {
     DWORD peerPid = 0;
     uint64_t tx = 0, rx = 0;
     ULONGLONG handshakeStart = 0;
-    EncryptedPasswordMessage stored = {}; // Only encrypted received password retained.
+    EncryptedPasswordMessage stored = {}; // Only the encrypted received password is retained.
     wchar_t input[61] = {};
     size_t inputLength = 0;
     ~App() { SecureZeroMemory(input, sizeof(input)); SecureZeroMemory(&stored, sizeof(stored)); }
@@ -121,7 +121,7 @@ bool MatchesPeer(const App& a, HWND sender) {
     DWORD pid = 0;
     return sender && sender == a.peer && GetWindowThreadProcessId(sender, &pid) && pid == a.peerPid;
 }
-// -1 transport failure, 0 explicit rejection, 1 accepted.
+// -1: transport failure, 0: explicit rejection, 1: accepted.
 int SendRaw(App& a, ULONG_PTR type, const void* data, DWORD size) {
     if (!MatchesPeer(a, a.peer)) return -1;
     COPYDATASTRUCT cd = {type, size, const_cast<void*>(data)};
@@ -145,7 +145,7 @@ bool SendRecord(App& a, uint32_t kind, const BYTE* data, size_t size) {
     int result = SendRaw(a, IPC_ENCRYPTED_RECORD, &m, ENCRYPTED_WIRE_SIZE);
     SecureZeroMemory(&m, sizeof(m));
     if (result != 1) {
-        // Delivery is ambiguous after a timeout: never reuse this sequence/key.
+        // Delivery is ambiguous after a timeout: never reuse this sequence number/key pair.
         a.done = true; a.exitCode = 1; return false;
     }
     ++a.tx;
@@ -153,7 +153,7 @@ bool SendRecord(App& a, uint32_t kind, const BYTE* data, size_t size) {
 }
 void CloseSession(App& a) {
     if (a.phase == Phase::Ready && !SendRecord(a, RECORD_CLOSE, nullptr, 0))
-        std::cout << "Kapatma mesaji iletilemedi; yerel anahtarlar temizlenecek.\n";
+        std::cout << "The close message could not be delivered; local keys will be cleared.\n";
     a.done = true;
 }
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -181,7 +181,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (!DeriveSessionKeys(a->crypto, m.publicKey, a->menu)) return FALSE;
         a->peer = sender; a->peerPid = pid;
         a->phase = a->menu ? Phase::Ready : Phase::ReplyPending;
-        std::cout << "ECDH anahtarlari turetildi.\n";
+        std::cout << "ECDH keys derived.\n";
         return TRUE;
     }
     if (cd->dwData != IPC_ENCRYPTED_RECORD || cd->cbData != ENCRYPTED_WIRE_SIZE ||
@@ -190,7 +190,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     EncryptedPasswordMessage m = {}; std::memcpy(&m, cd->lpData, ENCRYPTED_WIRE_SIZE);
     Plain plain; uint32_t length = 0;
     if (!Open(a->ReceiveKey(), a->rx + 1, m, plain, length)) {
-        std::cout << "RED: surum/sira/tag/veri dogrulamasi.\n"; return FALSE;
+        std::cout << "REJECTED: version/sequence/tag/data validation failed.\n"; return FALSE;
     }
     if (a->automatic && m.kind == RECORD_PASSWORD) {
         const char* expected = a->menu ? "client-test-password" : "menu-test-password";
@@ -201,20 +201,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     if (m.kind == RECORD_TEST_DONE && (!a->automatic || !a->menu)) return FALSE;
     ++a->rx;
     if (m.kind == RECORD_CLOSE) {
-        std::cout << "Dogrulanmis kapatma mesaji alindi.\n";
+        std::cout << "Authenticated close message received.\n";
         a->phase = Phase::Closed; a->done = true;
     } else if (m.kind == RECORD_TEST_DONE) {
         a->peerTestDone = true;
     } else {
         a->stored = m; a->gotPassword = true;
         std::cout << (a->menu ? "Client -> Menu" : "Menu -> Client")
-                  << ": parola cozuldu ve tag dogrulandi (" << length << " bayt).\n";
-        // KP update belongs here; this demo deliberately does not access a database.
-        // Plain is wiped on return; only ciphertext is retained in a->stored.
+                  << ": password decrypted and tag verified (" << length << " bytes).\n";
+        // The KP update belongs here; this demo deliberately does not access a database.
+        // Plaintext is wiped on return; only ciphertext is retained in a->stored.
     }
     return TRUE;
 }
 bool MakeWindow(App& a, const std::wstring& name) {
+    // A message-only window is used as this process's private IPC endpoint.
     if (FindWindowExW(HWND_MESSAGE, nullptr, name.c_str(), nullptr)) return false;
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc; wc.hInstance = GetModuleHandleW(nullptr);
@@ -242,11 +243,11 @@ bool AutoSend(App& a) {
     ++a.tx;
     if (a.negativeTests && SendRaw(a, IPC_ENCRYPTED_RECORD, &original, ENCRYPTED_WIRE_SIZE) != 0)
         return false;
-    if (a.negativeTests) std::cout << "PASS: bozuk tag/veri, yanlis surum, kisa mesaj, replay reddedildi.\n";
+    if (a.negativeTests) std::cout << "PASS: corrupt tag/data, wrong version, short message, and replay rejected.\n";
     return true;
 }
 void PollConsole(App& a) {
-    // Nonblocking input: the same thread keeps pumping window messages.
+    // Nonblocking input: the same thread continues pumping window messages.
     while (_kbhit()) {
         int ch = _getwch();
         if (ch == 0 || ch == 0xE0) { _getwch(); continue; }
@@ -265,10 +266,10 @@ void PollConsole(App& a) {
         int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, a.input,
                     static_cast<int>(a.inputLength), reinterpret_cast<char*>(utf8.bytes), 60, nullptr, nullptr);
         SecureZeroMemory(a.input, sizeof(a.input)); a.inputLength = 0;
-        if (a.phase != Phase::Ready) std::cout << "Oturum henuz hazir degil.\n";
-        else if (n <= 0) std::cout << "Parola UTF-8 olarak 1-60 bayt olmali.\n";
-        else if (SendRecord(a, RECORD_PASSWORD, utf8.bytes, n)) std::cout << "Sifreli parola gonderildi.\n";
-        else std::cout << "Gonderim basarisiz; oturum kapaniyor.\n";
+        if (a.phase != Phase::Ready) std::cout << "The session is not ready yet.\n";
+        else if (n <= 0) std::cout << "The password must be 1-60 bytes in UTF-8.\n";
+        else if (SendRecord(a, RECORD_PASSWORD, utf8.bytes, n)) std::cout << "Encrypted password sent.\n";
+        else std::cout << "Sending failed; the session is closing.\n";
     }
 }
 } // namespace
@@ -282,6 +283,7 @@ void ClearEcdhSession(EcdhSession& s) {
 }
 EcdhSession::~EcdhSession() { ClearEcdhSession(*this); }
 bool CreateEcdhSession(EcdhSession& s) {
+    // Create a fresh ephemeral P-256 key pair for this application run.
     ClearEcdhSession(s);
     ULONG size = 0;
     bool ok = BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&s.algorithm, BCRYPT_ECDH_P256_ALGORITHM, nullptr, 0)) &&
@@ -292,6 +294,7 @@ bool CreateEcdhSession(EcdhSession& s) {
     return ok;
 }
 bool DeriveSessionKeys(EcdhSession& s, const BYTE peer[72], bool menu) {
+    // Validate and import the peer's public key before performing ECDH.
     if (!s.algorithm || !s.privateKey || s.ready) return false;
     BCRYPT_ECCKEY_BLOB header = {}; std::memcpy(&header, peer, sizeof(header));
     if (header.dwMagic != BCRYPT_ECDH_PUBLIC_P256_MAGIC || header.cbKey != 32) return false;
@@ -300,16 +303,21 @@ bool DeriveSessionKeys(EcdhSession& s, const BYTE peer[72], bool menu) {
                             &imported.h, const_cast<BYTE*>(peer), 72, 0)) ||
         !BCRYPT_SUCCESS(BCryptSecretAgreement(s.privateKey, imported.h, &secret.h, 0))) return false;
     BYTE transcript[144];
+    // Use a stable Menu-then-Client ordering so both sides derive identical keys.
     std::memcpy(transcript, menu ? s.publicKey : peer, 72);
     std::memcpy(transcript + 72, menu ? peer : s.publicKey, 72);
     bool ok = Derive(secret.h, transcript, "session-v2/menu-to-client", s.menuToClientKey) &&
               Derive(secret.h, transcript, "session-v2/client-to-menu", s.clientToMenuKey);
     if (!ok) { SecureZeroMemory(s.menuToClientKey, 32); SecureZeroMemory(s.clientToMenuKey, 32); }
-    else { BCryptDestroyKey(s.privateKey); s.privateKey = nullptr; s.ready = true; }
+    else {
+        // The private ECDH key is no longer needed once directional session keys exist.
+        BCryptDestroyKey(s.privateKey); s.privateKey = nullptr; s.ready = true;
+    }
     return ok;
 }
 
 int RunSessionApplication(bool menu, int argc, char** argv) {
+    // This function hosts the complete lifecycle for either Menu or Client.
     App a; a.menu = menu;
     std::wstring channel = L"default";
     for (int i = 1; i < argc; ++i) {
@@ -325,22 +333,27 @@ int RunSessionApplication(bool menu, int argc, char** argv) {
     std::cout << std::unitbuf;
     std::wstring own = (menu ? L"SessionV2.Menu." : L"SessionV2.Client.") + channel;
     std::wstring other = (menu ? L"SessionV2.Client." : L"SessionV2.Menu.") + channel;
-    if (!MakeWindow(a, own)) { std::cerr << "Pencere olusturulamadi veya bu uygulama zaten acik.\n"; return 1; }
-    if (!CreateEcdhSession(a.crypto)) { DestroyWindow(a.window); std::cerr << "ECDH olusturulamadi.\n"; return 1; }
+    // Each channel creates an isolated pair of message-window names.
+    if (!MakeWindow(a, own)) { std::cerr << "The window could not be created, or this application is already running.\n"; return 1; }
+    if (!CreateEcdhSession(a.crypto)) { DestroyWindow(a.window); std::cerr << "ECDH session creation failed.\n"; return 1; }
+    // Convert Ctrl+C and Ctrl+Break into a graceful, authenticated shutdown request.
     SetConsoleCtrlHandler(ConsoleControl, TRUE);
-    std::cout << (menu ? "App1/Menu" : "App2/Client") << " hazir.\n";
+    std::cout << (menu ? "App1/Menu" : "App2/Client") << " is ready.\n";
     if (menu) {
+        // Menu initiates the handshake; Client waits for this public-key message.
         a.peer = FindWindowExW(HWND_MESSAGE, nullptr, other.c_str(), nullptr);
         if (!a.peer || !GetWindowThreadProcessId(a.peer, &a.peerPid)) {
-            std::cerr << "App2 bulunamadi. Once App2'yi calistir.\n"; a.done = true; a.exitCode = 1;
+            std::cerr << "App2 was not found. Start App2 first.\n"; a.done = true; a.exitCode = 1;
         } else {
             a.phase = Phase::AwaitingReply; a.handshakeStart = GetTickCount64();
+            // Send only the public ECDH key. The shared secret never leaves this process.
             if (!SendPublic(a)) { a.done = true; a.exitCode = 1; }
         }
     }
-    if (!a.automatic) std::cout << "Parola yazip Enter'a basin (gizli giris); kapatmak icin /quit + Enter veya Ctrl+C.\n";
+    if (!a.automatic) std::cout << "Enter a password and press Enter (masked input); use /quit + Enter or Ctrl+C to close.\n";
     ULONGLONG start = GetTickCount64();
     while (!a.done) {
+        // Dispatch incoming WM_COPYDATA messages before polling console input.
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { a.done = true; break; }
@@ -349,31 +362,34 @@ int RunSessionApplication(bool menu, int argc, char** argv) {
         if (a.done) break;
         if (InterlockedCompareExchange(&stopRequested, 0, 0)) { CloseSession(a); break; }
         if (a.phase == Phase::ReplyPending) {
-            // Respond outside the receiver callback; no console input or nested handshake.
+            // Reply outside the receiver callback; avoid console input or a nested handshake.
             a.phase = Phase::Ready;
             if (!SendPublic(a)) { a.done = true; a.exitCode = 1; }
         }
-        if (a.peer && !MatchesPeer(a, a.peer)) { std::cout << "Karsi uygulama kapandi.\n"; a.done = true; a.exitCode = 1; }
+        if (a.peer && !MatchesPeer(a, a.peer)) { std::cout << "The peer application closed.\n"; a.done = true; a.exitCode = 1; }
         if (a.phase == Phase::AwaitingReply && GetTickCount64() - a.handshakeStart > 5000) {
-            std::cerr << "ECDH cevap zaman asimi.\n"; a.done = true; a.exitCode = 1;
+            std::cerr << "ECDH reply timed out.\n"; a.done = true; a.exitCode = 1;
         }
         if (a.done) break;
         if (a.automatic) {
-            if (GetTickCount64() - start > 15000) { std::cerr << "Test zaman asimi.\n"; a.done = true; a.exitCode = 1; }
+            // Automatic mode exercises a complete two-way encrypted exchange.
+            if (GetTickCount64() - start > 15000) { std::cerr << "Test timed out.\n"; a.done = true; a.exitCode = 1; }
             else if (a.phase == Phase::Ready && !a.autoSent && (menu || a.gotPassword)) {
                 a.autoSent = true;
                 if (!AutoSend(a) || (!menu && !SendRecord(a, RECORD_TEST_DONE, nullptr, 0))) {
-                    std::cerr << "TEST FAIL\n"; a.done = true; a.exitCode = 1;
+                    std::cerr << "TEST FAILED\n"; a.done = true; a.exitCode = 1;
                 }
             } else if (menu && a.autoSent && a.gotPassword && a.peerTestDone) CloseSession(a);
         } else PollConsole(a);
+        // Wait briefly for either more window messages or another console keypress.
         if (!a.done) MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_ALLINPUT);
     }
+    // Clear all sensitive state before releasing the message window and exiting.
     ClearEcdhSession(a.crypto);
     SecureZeroMemory(&a.stored, sizeof(a.stored));
     SecureZeroMemory(a.input, sizeof(a.input));
     DestroyWindow(a.window); SetConsoleCtrlHandler(ConsoleControl, FALSE);
     if (a.automatic && (!a.autoSent || !a.gotPassword)) a.exitCode = 1;
-    std::cout << "Oturum kapandi; anahtarlar ve gecici parola alanlari temizlendi.\n";
+    std::cout << "Session closed; keys and temporary password buffers were cleared.\n";
     return a.exitCode;
 }
